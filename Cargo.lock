@@ -4827,6 +4827,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ringbuf"
+version = "0.4.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "726bb493fe9cac765e8f96a144c3a8396bdf766dedad22e504b70b908dcbceb4"
+dependencies = [
+ "crossbeam-utils",
+ "portable-atomic",
+]
+
+[[package]]
 name = "rocksdb"
 version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6961,6 +6971,7 @@ dependencies = [
  "crossbeam-channel",
  "log",
  "rand 0.8.5",
+ "ringbuf",
  "solana-entry",
  "solana-ledger",
  "solana-logger",

@@ -10,13 +10,16 @@
 //! For Entries:
 //! * recorded entry must be >= WorkingBank::min_tick_height && entry must be < WorkingBank::max_tick_height
 //!
+
+
 #[cfg(feature = "dev-context-only-utils")]
 use solana_ledger::genesis_utils::{create_genesis_config, GenesisConfigInfo};
 use {
     crate::{leader_bank_notifier::LeaderBankNotifier, poh_service::PohService},
     crossbeam_channel::{
-        bounded, unbounded, Receiver, RecvTimeoutError, SendError, Sender, TrySendError,
+        unbounded, Receiver, SendError, Sender, TrySendError,
     },
+    ringbuf::{traits::*, SharedRb, storage::Array},
     log::*,
     solana_entry::{
         entry::{hash_transactions, Entry},
@@ -37,16 +40,18 @@ use {
     std::{
         cmp,
         sync::{
-            atomic::{AtomicBool, Ordering},
+            atomic::AtomicBool,
             Arc, Mutex, RwLock,
         },
-        time::{Duration, Instant},
+        time::Instant,
     },
     thiserror::Error,
 };
 
 pub const GRACE_TICKS_FACTOR: u64 = 2;
 pub const MAX_GRACE_SLOTS: u64 = 2;
+
+pub const POH_RECORDER_RB_CAPACITY : usize = 1000;
 
 #[derive(Error, Debug, Clone)]
 pub enum PohRecorderError {
@@ -140,25 +145,25 @@ pub struct RecordTransactionsSummary {
     pub starting_transaction_index: Option<usize>,
 }
 
-#[derive(Clone)]
+//#[derive(Clone)]
 pub struct TransactionRecorder {
     // shared by all users of PohRecorder
-    pub record_sender: Sender<Record>,
     pub is_exited: Arc<AtomicBool>,
+    pub tx_recorder_rb: SharedRb<Array<(Slot, Hash, Vec<VersionedTransaction>), POH_RECORDER_RB_CAPACITY>>,
 }
 
 impl TransactionRecorder {
-    pub fn new(record_sender: Sender<Record>, is_exited: Arc<AtomicBool>) -> Self {
+    pub fn new(is_exited: Arc<AtomicBool>, tx_recorder_rb: SharedRb<Array<(Slot, Hash, Vec<VersionedTransaction>), POH_RECORDER_RB_CAPACITY>>) -> Self {
         Self {
-            record_sender,
             is_exited,
+            tx_recorder_rb,
         }
     }
 
     /// Hashes `transactions` and sends to PoH service for recording. Waits for response up to 1s.
     /// Panics on unexpected (non-`MaxHeightReached`) errors.
     pub fn record_transactions(
-        &self,
+        &mut self,
         bank_slot: Slot,
         transactions: Vec<VersionedTransaction>,
     ) -> RecordTransactionsSummary {
@@ -169,6 +174,8 @@ impl TransactionRecorder {
             let (hash, hash_us) = measure_us!(hash_transactions(&transactions));
             record_transactions_timings.hash_us = hash_us;
 
+            // Send a request to reserve a slot, get ack/nack along with slot ID
+            // At the time of recording send the record request along with slot ID
             let (res, poh_record_us) = measure_us!(self.record(bank_slot, hash, transactions));
             record_transactions_timings.poh_record_us = poh_record_us;
 
@@ -203,42 +210,33 @@ impl TransactionRecorder {
 
     // Returns the index of `transactions.first()` in the slot, if being tracked by WorkingBank
     pub fn record(
-        &self,
+        &mut self,
         bank_slot: Slot,
         mixin: Hash,
         transactions: Vec<VersionedTransaction>,
     ) -> Result<Option<usize>> {
         // create a new channel so that there is only 1 sender and when it goes out of scope, the receiver fails
-        let (result_sender, result_receiver) = bounded(1);
-        let res =
-            self.record_sender
-                .send(Record::new(mixin, transactions, bank_slot, result_sender));
-        if res.is_err() {
-            // If the channel is dropped, then the validator is shutting down so return that we are hitting
-            //  the max tick height to stop transaction processing and flush any transactions in the pipeline.
-            return Err(PohRecorderError::MaxHeightReached);
-        }
-        // Besides validator exit, this timeout should primarily be seen to affect test execution environments where the various pieces can be shutdown abruptly
-        let mut is_exited = false;
-        loop {
-            let res = result_receiver.recv_timeout(Duration::from_millis(1000));
-            match res {
-                Err(RecvTimeoutError::Timeout) => {
-                    if is_exited {
-                        return Err(PohRecorderError::MaxHeightReached);
-                    } else {
-                        // A result may have come in between when we timed out checking this
-                        // bool, so check the channel again, even if is_exited == true
-                        is_exited = self.is_exited.load(Ordering::SeqCst);
-                    }
-                }
-                Err(RecvTimeoutError::Disconnected) => {
-                    return Err(PohRecorderError::MaxHeightReached);
-                }
-                Ok(result) => {
-                    return result;
-                }
+        //let (result_sender, result_receiver) = bounded(1);
+        let res = self.tx_recorder_rb.try_push((bank_slot, mixin, transactions));
+
+        match res {
+            Err(e) => {
+                // If the channel is dropped, then the validator is shutting down so return that we are hitting
+                //  the max tick height to stop transaction processing and flush any transactions in the pipeline.
+                return Err(PohRecorderError::MaxHeightReached);
             }
+            Ok(_) => {
+                return Ok(Some(self.tx_recorder_rb.read_index()));
+            }
+        }
+    }
+}
+
+impl Clone for TransactionRecorder {
+    fn clone(&self) -> TransactionRecorder {
+        Self {
+            is_exited : self.is_exited.clone(),
+            tx_recorder_rb : ringbuf::StaticRb::<(Slot, Hash, Vec<VersionedTransaction>), POH_RECORDER_RB_CAPACITY>::default()
         }
     }
 }
@@ -437,7 +435,7 @@ impl PohRecorder {
     }
 
     pub fn new_recorder(&self) -> TransactionRecorder {
-        TransactionRecorder::new(self.record_sender.clone(), self.is_exited.clone())
+        TransactionRecorder::new(self.is_exited.clone(), ringbuf::StaticRb::<(Slot, Hash, Vec<VersionedTransaction>), POH_RECORDER_RB_CAPACITY>::default())
     }
 
     pub fn new_leader_bank_notifier(&self) -> Arc<LeaderBankNotifier> {
@@ -963,7 +961,7 @@ impl PohRecorder {
 
         let ((), report_metrics_us) = measure_us!(self.report_metrics(bank_slot));
         self.report_metrics_us += report_metrics_us;
-
+        // adityak: can check if rb is full
         loop {
             let (flush_cache_res, flush_cache_us) = measure_us!(self.flush_cache(false));
             self.flush_cache_no_tick_us += flush_cache_us;

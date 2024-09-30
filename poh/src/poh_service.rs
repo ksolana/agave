@@ -260,6 +260,7 @@ impl PohService {
                         record.mixin,
                         std::mem::take(&mut record.transactions),
                     );
+                    // pop the ringbuf somewhere here when the record returns a transaction index.
                     let (send_res, send_record_result_us) = measure_us!(record.sender.send(res));
                     debug_assert!(send_res.is_ok(), "Record wasn't sent.");
 

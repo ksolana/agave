@@ -13,6 +13,7 @@ edition = { workspace = true }
 core_affinity = { workspace = true }
 crossbeam-channel = { workspace = true }
 log = { workspace = true }
+ringbuf = "0.4.7"
 solana-entry = { workspace = true }
 solana-ledger = { workspace = true }
 solana-measure = { workspace = true }

@@ -1,7 +1,10 @@
 [profile.release-with-debug]
 inherits = "release"
 debug = true
-split-debuginfo = "packed"
+split-debuginfo = "unpacked"
+lto = "thin"
+#target-cpu = "native"
+#llvm-args = "--inline-threshold=400"
 
 [workspace]
 members = [

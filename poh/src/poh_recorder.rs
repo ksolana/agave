@@ -788,7 +788,7 @@ impl PohRecorder {
                 }
             }
         }
-        if self.tick_height >= working_bank.max_tick_height {
+        if self.tick_height >= working_bank.max_tick_height { // tsan: read
             info!(
                 "poh_record: max_tick_height {} reached, clearing working_bank {}",
                 working_bank.max_tick_height,
@@ -805,7 +805,7 @@ impl PohRecorder {
             self.clear_bank();
         } else {
             // commit the flush
-            let _ = self.tick_cache.drain(..entry_count);
+            let _ = self.tick_cache.drain(..entry_count); // tsan1: write
         }
 
         Ok(())
@@ -881,7 +881,7 @@ impl PohRecorder {
         self.tick_lock_contention_us += tick_lock_contention_us;
 
         if let Some(poh_entry) = poh_entry {
-            self.tick_height += 1;
+            self.tick_height += 1; // tsan: write
             trace!("tick_height {}", self.tick_height);
             self.report_poh_timing_point();
 
@@ -892,7 +892,7 @@ impl PohRecorder {
                 return;
             }
 
-            self.tick_cache.push((
+            self.tick_cache.push(( // tsan1: read
                 Entry {
                     num_hashes: poh_entry.num_hashes,
                     hash: poh_entry.hash,
